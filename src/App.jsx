@@ -4,7 +4,7 @@ import {
   MessageCircleQuestion, Settings2, CheckCircle2, Send, 
   Users, MessageSquare, ShieldCheck, GraduationCap, X,
   ThumbsUp, HelpCircle, History, CornerDownRight, Zap, Key,
-  TrendingUp, Award, Flame
+  TrendingUp, Award, Flame, Trash2
 } from 'lucide-react';
 
 export default function App() {
@@ -79,6 +79,7 @@ export default function App() {
         } else if (payload.eventType === 'UPDATE') {
           setQuestions(prev => prev.map(q => q.id === payload.new.id ? payload.new : q));
         } else if (payload.eventType === 'DELETE') {
+          // 同步删除给所有在线用户（含学生端）
           setQuestions(prev => prev.filter(q => q.id !== payload.old.id));
         }
       })
@@ -101,6 +102,32 @@ export default function App() {
     if (error) {
       console.error('状态更新失败:', error);
       alert('操作失败：' + error.message);
+    }
+  };
+
+  // ✅ 新功能1: 教师删除问题
+  const handleDelete = async (qId) => {
+    if (!window.confirm('确定要删除这条问题吗？删除后无法恢复。')) return;
+    // 乐观更新：立即从本地移除
+    setQuestions(prev => prev.filter(q => q.id !== qId));
+    const { error } = await supabase.from('questions').delete().eq('id', qId);
+    if (error) {
+      console.error('删除失败:', error);
+      alert('删除失败：' + error.message);
+      // 回滚：重新拉取数据
+      refreshAllData();
+    }
+  };
+
+  // ✅ 新功能：教师删除问题
+  const handleDeleteQuestion = async (qId) => {
+    if (!window.confirm('确定要删除这条问题吗？删除后不可恢复。')) return;
+    setQuestions(prev => prev.filter(q => q.id !== qId)); // 乐观更新
+    const { error } = await supabase.from('questions').delete().eq('id', qId);
+    if (error) {
+      console.error('删除失败:', error);
+      alert('删除失败：' + error.message);
+      refreshAllData(); // 失败则回滚
     }
   };
 
@@ -143,14 +170,15 @@ export default function App() {
         {role === 'teacher' ? (
           <TeacherDashboard 
             globalState={globalState}
-            setGlobalState={setGlobalState}  // ✅ 修复4: 传入 setter 供子组件乐观更新
+            setGlobalState={setGlobalState}
             questions={questions}
-            setQuestions={setQuestions}       // ✅ 修复5: 传入 setter 供子组件乐观更新
+            setQuestions={setQuestions}
             currentQuestions={currentQuestions}
             topics={topics}
             setTopics={setTopics}
             onStatusChange={handleStatusChange}
-            onRefresh={refreshAllData}        // ✅ 修复4/5: 写操作后主动刷新的降级方案
+            onDelete={handleDelete}
+            onRefresh={refreshAllData}
           />
         ) : (
           <StudentDashboard 
@@ -261,7 +289,7 @@ function RoleSelection({ onSelect }) {
 // ==========================================
 // 2. 教师端控制台
 // ==========================================
-function TeacherDashboard({ globalState, setGlobalState, questions, setQuestions, currentQuestions, topics, setTopics, onStatusChange, onRefresh }) {
+function TeacherDashboard({ globalState, setGlobalState, questions, setQuestions, currentQuestions, topics, setTopics, onStatusChange, onDelete, onRefresh }) {
   const [activeTab, setActiveTab] = useState('control');
   
   const maxConfusions = useMemo(() => {
@@ -280,6 +308,7 @@ function TeacherDashboard({ globalState, setGlobalState, questions, setQuestions
           setGlobalState={setGlobalState}
           currentQuestions={currentQuestions}
           onStatusChange={onStatusChange}
+          onDelete={onDelete}
           maxConfusions={maxConfusions}
           onRefresh={onRefresh}
           setTopics={setTopics}
@@ -299,7 +328,7 @@ function TabButton({ active, onClick, icon, children }) {
   );
 }
 
-function TeacherControlPanel({ globalState, setGlobalState, currentQuestions, onStatusChange, maxConfusions, onRefresh, setTopics }) {
+function TeacherControlPanel({ globalState, setGlobalState, currentQuestions, onStatusChange, onDelete, maxConfusions, onRefresh, setTopics }) {
   const [editTopic, setEditTopic] = useState(globalState.topic);
   const [filter, setFilter] = useState('all');
   const [saving, setSaving] = useState(false);
@@ -413,7 +442,7 @@ function TeacherControlPanel({ globalState, setGlobalState, currentQuestions, on
               {filteredQuestions.length === 0 ? (
                 <p className="text-center py-8 text-slate-400 text-sm">当前主题暂无数据</p>
               ) : (
-                filteredQuestions.map(q => <QuestionItem key={q.id} question={q} isTeacher={true} onStatusChange={onStatusChange} maxConfusions={maxConfusions} globalState={globalState} />)
+                filteredQuestions.map(q => <QuestionItem key={q.id} question={q} isTeacher={true} onStatusChange={onStatusChange} onDelete={onDelete} maxConfusions={maxConfusions} globalState={globalState} />)
               )}
             </div>
           </div>
@@ -533,12 +562,13 @@ function TrendingQuestionsChart({ questions }) {
 function StudentDashboard({ user, userName, globalState, questions, setQuestions, onStatusChange, onRefresh }) {
   const [newQuestion, setNewQuestion] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  // ✅ 新功能2: 我的问题 / 所有问题 筛选，默认显示全部
+  const [myFilter, setMyFilter] = useState('all');
 
   const handleAsk = async () => {
     if (!newQuestion.trim() || submitting) return;
     setSubmitting(true);
 
-    // ✅ 修复3: 使用 crypto.randomUUID() 生成合法 UUID，避免与 Supabase 主键类型冲突
     const qData = {
       id: crypto.randomUUID(),
       topic_id: globalState.topic_id,
@@ -560,7 +590,6 @@ function StudentDashboard({ user, userName, globalState, questions, setQuestions
       return;
     }
 
-    // ✅ 修复5: 乐观更新——提交成功后立即显示，不等待 Realtime
     setQuestions(prev => {
       if (prev.some(q => q.id === qData.id)) return prev;
       return [qData, ...prev];
@@ -572,6 +601,12 @@ function StudentDashboard({ user, userName, globalState, questions, setQuestions
   const maxConfusions = useMemo(() => {
     return questions.reduce((max, q) => Math.max(max, (q.confused_by || []).length), 0);
   }, [questions]);
+
+  // 根据筛选条件过滤
+  const displayedQuestions = useMemo(() => {
+    if (myFilter === 'mine') return questions.filter(q => q.author_name === userName);
+    return questions;
+  }, [questions, myFilter, userName]);
 
   return (
     <div className="space-y-6">
@@ -600,21 +635,40 @@ function StudentDashboard({ user, userName, globalState, questions, setQuestions
         </div>
 
         <div className="md:col-span-2 space-y-4">
-          <div className="flex justify-between items-end mb-2 px-1">
-            <h3 className="text-lg font-semibold text-slate-800">讨论区</h3>
-            <span className="text-xs text-slate-500 bg-slate-200 px-2 py-1 rounded-full">{questions.length} 条发言</span>
+          {/* ✅ 新功能2: 筛选栏 */}
+          <div className="flex justify-between items-center px-1">
+            <div className="flex items-center space-x-1 bg-slate-100 p-1 rounded-lg">
+              <button
+                onClick={() => setMyFilter('all')}
+                className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${myFilter === 'all' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                所有问题
+              </button>
+              <button
+                onClick={() => setMyFilter('mine')}
+                className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${myFilter === 'mine' ? 'bg-white shadow-sm text-indigo-700' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                我的问题
+              </button>
+            </div>
+            <span className="text-xs text-slate-500 bg-slate-200 px-2 py-1 rounded-full">
+              {displayedQuestions.length} 条发言
+            </span>
           </div>
+
           <div className="space-y-5">
-            {questions.length === 0 ? (
-              <div className="bg-white p-12 rounded-2xl text-center border border-slate-200 text-slate-400">暂无同学发言，快来抢沙发！</div>
+            {displayedQuestions.length === 0 ? (
+              <div className="bg-white p-12 rounded-2xl text-center border border-slate-200 text-slate-400">
+                {myFilter === 'mine' ? '你还没有在当前话题下发过言，快来说说吧！' : '暂无同学发言，快来抢沙发！'}
+              </div>
             ) : (
-              questions.map(q => (
+              displayedQuestions.map(q => (
                 <QuestionItem 
                   key={q.id} question={q} isTeacher={false} 
                   currentUserId={userName} currentUserName={userName} 
                   globalState={globalState} onStatusChange={onStatusChange} 
                   maxConfusions={maxConfusions}
-                  setQuestions={setQuestions}  // ✅ 修复5: 传入供回复/点赞乐观更新
+                  setQuestions={setQuestions}
                 />
               ))
             )}
@@ -628,7 +682,7 @@ function StudentDashboard({ user, userName, globalState, questions, setQuestions
 // ==========================================
 // 4. 共享组件：单条问答卡片
 // ==========================================
-function QuestionItem({ question, isTeacher, onStatusChange, currentUserId, currentUserName, globalState, readonly, maxConfusions, setQuestions }) {
+function QuestionItem({ question, isTeacher, onStatusChange, onDelete, currentUserId, currentUserName, globalState, readonly, maxConfusions, setQuestions }) {
   const [replyText, setReplyText] = useState('');
   const [isReplying, setIsReplying] = useState(false);
 
@@ -736,9 +790,19 @@ function QuestionItem({ question, isTeacher, onStatusChange, currentUserId, curr
         </div>
         <div className="flex items-center space-x-2">
           {isTeacher && !readonly && (
-            <div className="flex space-x-1 mr-2 bg-slate-50 p-1 rounded-lg border border-slate-100">
-              <button onClick={() => onStatusChange(question.id, 'unresolved')} className={`p-1 ${question.status==='unresolved'?'text-rose-500 bg-rose-100':'text-slate-400 hover:text-rose-500'} rounded`}><MessageCircleQuestion className="w-4 h-4" /></button>
-              <button onClick={() => onStatusChange(question.id, 'resolved')} className={`p-1 ${question.status==='resolved'?'text-emerald-500 bg-emerald-100':'text-slate-400 hover:text-emerald-500'} rounded`}><CheckCircle2 className="w-4 h-4" /></button>
+            <div className="flex items-center space-x-2 mr-2">
+              <div className="flex space-x-1 bg-slate-50 p-1 rounded-lg border border-slate-100">
+                <button onClick={() => onStatusChange(question.id, 'unresolved')} className={`p-1 ${question.status==='unresolved'?'text-rose-500 bg-rose-100':'text-slate-400 hover:text-rose-500'} rounded`} title="标记为未解决"><MessageCircleQuestion className="w-4 h-4" /></button>
+                <button onClick={() => onStatusChange(question.id, 'resolved')} className={`p-1 ${question.status==='resolved'?'text-emerald-500 bg-emerald-100':'text-slate-400 hover:text-emerald-500'} rounded`} title="标记为已解决"><CheckCircle2 className="w-4 h-4" /></button>
+              </div>
+              {/* ✅ 新功能1: 删除按钮 */}
+              <button
+                onClick={() => onDelete && onDelete(question.id)}
+                className="p-1.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-colors border border-transparent hover:border-rose-100"
+                title="删除这条问题"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
             </div>
           )}
           {!readonly && (
